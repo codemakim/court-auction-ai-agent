@@ -1,0 +1,18 @@
+[project]
+name = "court-auction-ai-agent"
+version = "0.1.0"
+description = "Ollama-based one-by-one enrichment worker for court auction data"
+requires-python = ">=3.12"
+dependencies = [
+  "pydantic-settings>=2.12",
+  "requests>=2.32",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=9"]
+
+[project.scripts]
+court-auction-ai-agent = "court_auction_ai_agent.cli:main"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

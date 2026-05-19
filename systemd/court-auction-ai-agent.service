@@ -1,0 +1,18 @@
+[Unit]
+Description=Court Auction AI Agent Worker
+After=network-online.target ollama.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jhkim
+WorkingDirectory=/home/jhkim/code/court-auction-ai-agent
+EnvironmentFile=-/etc/court-auction-ai-agent.env
+ExecStart=/home/jhkim/code/court-auction-ai-agent/.venv/bin/court-auction-ai-agent worker-loop
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
