@@ -52,6 +52,7 @@ class EnrichmentWorker:
             )
             if attempts >= self.max_attempts:
                 continue
+            print({"event": "processing", "auction_id": candidate.auction_id, "external_key": candidate.external_key}, flush=True)
             try:
                 payload = self.ollama_client.enrich(candidate)
             except Exception as exc:
@@ -68,6 +69,7 @@ class EnrichmentWorker:
                     status="failed",
                     error_message=str(exc),
                 )
+                print({"event": "failed", "auction_id": candidate.auction_id, "external_key": candidate.external_key, "error": str(exc)}, flush=True)
                 return WorkerResult(candidate.auction_id, candidate.external_key, "failed")
             save_summary(
                 self.db_path,
@@ -87,5 +89,6 @@ class EnrichmentWorker:
                 mobile_highlights=payload["mobile_highlights"],
                 raw_response=payload,
             )
+            print({"event": "success", "auction_id": candidate.auction_id, "external_key": candidate.external_key}, flush=True)
             return WorkerResult(candidate.auction_id, candidate.external_key, "success")
         return WorkerResult(None, None, "idle")
