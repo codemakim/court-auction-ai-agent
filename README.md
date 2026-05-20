@@ -1,6 +1,6 @@
 # Court Auction AI Agent
 
-법원 경매 수집 데이터에 대해 Ollama `gemma4:26b`를 한 건씩 호출해 모바일에서 보기 쉬운 요약/리스크 코멘트를 생성하는 독립 워커입니다.
+법원 경매 수집 데이터에 대해 Ollama `gemma4:e4b`를 한 건씩 호출해 모바일에서 보기 쉬운 요약/리스크 코멘트를 생성하는 독립 워커입니다.
 
 ## 책임 범위
 
@@ -16,7 +16,7 @@
 crawler DB: /var/lib/court-auction-collector/data/court_auction.sqlite3
 AI DB:      /var/lib/court-auction-ai-agent/data/auction_ai.sqlite3
 Ollama:     http://127.0.0.1:11434
-Model:      gemma4:26b
+Model:      gemma4:e4b
 ```
 
 ## 로컬 실행

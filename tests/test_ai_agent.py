@@ -4,7 +4,7 @@ from pathlib import Path
 
 from court_auction_ai_agent.crawler_source import CrawlerSource
 from court_auction_ai_agent.db import count_by_status, get_latest_summary, init_db, save_summary
-from court_auction_ai_agent.enrichment import build_prompt_payload, parse_model_response
+from court_auction_ai_agent.enrichment import build_analysis_input, build_prompt_payload, parse_model_response, response_schema
 from court_auction_ai_agent.worker import EnrichmentWorker
 
 
@@ -64,30 +64,44 @@ def test_crawler_source_returns_downloaded_sale_specs(tmp_path):
     assert '조사된 임차내역없음' in items[0].sale_spec_markdown
 
 
-def test_prompt_payload_is_compact_and_keeps_risk_facts(tmp_path):
+def test_analysis_input_is_structured_and_keeps_risk_facts(tmp_path):
     db = tmp_path / 'crawler.sqlite3'
     make_crawler_db(db)
     candidate = CrawlerSource(db).list_candidates()[0]
 
-    payload = build_prompt_payload(candidate)
+    payload = build_analysis_input(candidate)
 
     dumped = json.dumps(payload, ensure_ascii=False)
+    assert payload['document_type'] == 'sale_item_statement_enriched_raw'
+    assert payload['case']['case_number'] == '2025타경1'
+    assert payload['price']['minimum_sale_price'] == 240000000
     assert '최선순위설정2020.01.01' in dumped
     assert '조사된 임차내역없음' in dumped
     assert '개인정보유출주의' not in dumped
 
 
-def test_parse_model_response_accepts_json_object():
+def test_parse_model_response_accepts_investment_analysis_json():
     parsed = parse_model_response(json.dumps({
-        'summary_title': '가산동 아파트 1차 검토',
-        'summary_bullets': ['명세서상 임차내역 없음'],
-        'risk_label': 'review_recommended',
-        'risk_comment': '권리관계 확인 필요',
-        'mobile_highlights': ['최저가 2.4억']
+        'summary': {'overall_risk': 'HIGH', 'overall_merit': 'MEDIUM', 'one_line_opinion': '임차 리스크 확인 전 보수 접근'},
+        'critical_risks': [{'category': 'tenant', 'risk': '임차관계 확인 필요', 'reason': '명세서상 점유 문구', 'need_to_check': '전입/배당요구'}],
+        'merits': [{'category': 'price', 'merit': '1회 유찰', 'reason': '최저가 하락', 'confidence': 'MEDIUM'}],
+        'bid_price_analysis': {'minimum_sale_price': 240000000, 'estimated_extra_costs': ['명도비 확인 필요'], 'safe_bid_logic': '추가 인수금 차감', 'avoid_condition': '대항 임차 확인'},
+        'pre_bid_checklist': ['등기부 확인'],
+        'final_recommendation': {'action': 'NEED_MORE_DATA', 'reason': '임차관계 확인 필요'}
     }, ensure_ascii=False))
 
-    assert parsed['risk_label'] == 'review_recommended'
-    assert parsed['summary_bullets'] == ['명세서상 임차내역 없음']
+    assert parsed['summary']['overall_risk'] == 'HIGH'
+    assert parsed['summary']['overall_merit'] == 'MEDIUM'
+    assert parsed['final_recommendation']['action'] == 'NEED_MORE_DATA'
+    assert parsed['risk_label'] == 'HIGH'
+    assert '임차관계 확인 필요' in parsed['summary_bullets']
+
+
+def test_response_schema_matches_required_analysis_shape():
+    schema = response_schema()
+    assert 'summary' in schema['required']
+    assert 'critical_risks' in schema['required']
+    assert 'final_recommendation' in schema['required']
 
 
 def test_worker_skips_success_and_retries_failed_until_limit(tmp_path):
@@ -103,9 +117,15 @@ def test_worker_skips_success_and_retries_failed_until_limit(tmp_path):
             return {
                 'summary_title': '요약',
                 'summary_bullets': ['핵심'],
-                'risk_label': 'unknown',
+                'risk_label': 'HIGH',
                 'risk_comment': '확인 필요',
                 'mobile_highlights': ['확인 필요'],
+                'summary': {'overall_risk': 'HIGH', 'overall_merit': 'LOW', 'one_line_opinion': '확인 필요'},
+                'critical_risks': [],
+                'merits': [],
+                'bid_price_analysis': {'minimum_sale_price': 240000000, 'estimated_extra_costs': [], 'safe_bid_logic': '확인 필요', 'avoid_condition': '확인 필요'},
+                'pre_bid_checklist': [],
+                'final_recommendation': {'action': 'NEED_MORE_DATA', 'reason': '확인 필요'},
             }
 
     client = Client()
@@ -134,3 +154,19 @@ def test_worker_retries_failed_input_only_three_times(tmp_path):
     assert worker.run_once().status == 'failed'
     assert worker.run_once().status == 'idle'
     assert count_by_status(ai_db)['failed'] == 3
+
+
+def test_analysis_input_does_not_treat_table_labels_as_occupants(tmp_path):
+    db = tmp_path / 'crawler.sqlite3'
+    make_crawler_db(db)
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "UPDATE document_texts SET markdown_text = ? WHERE id = 100",
+            ('# 매각물건명세서\n\n[점유/임차 관계] 점유자성 명점유부분정보출처구 분점유의권 원임대차기간(점유기간)보 증 금차 임전입신고일자확정일자배당요구여부(배당요구일자)임예성전유부분 전부등기사항전부증명서주거 임차권자2020.10.30.350,000,0002020.10.30.2020.09.24.주택도시보증공사전유부분 전부권리신고주거 임차인2020.10.30.350,000,0002020.10.30.2020.09.24.2025.12.8.',),
+        )
+    candidate = CrawlerSource(db).list_candidates()[0]
+
+    payload = build_analysis_input(candidate)
+
+    names = [occupant['name_masked'] for occupant in payload['occupants']]
+    assert names == ['임OO']
