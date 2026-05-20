@@ -170,3 +170,24 @@ def test_analysis_input_does_not_treat_table_labels_as_occupants(tmp_path):
 
     names = [occupant['name_masked'] for occupant in payload['occupants']]
     assert names == ['임OO']
+
+
+def test_analysis_input_extracts_multiple_occupants_with_dates_and_deposits(tmp_path):
+    db = tmp_path / 'crawler.sqlite3'
+    make_crawler_db(db)
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "UPDATE document_texts SET markdown_text = ? WHERE id = 100",
+            ('# 매각물건명세서\n\n최선순위설정2022.01.10. 근저당권배당요구종기2026. 3. 25.\n[점유/임차 관계] 김철수301호현황조사주거 임차인2021.03.15.180,000,0002021.03.15.2021.03.20.2026.03.01.박영희302호권리신고주거 임차인2023.04.01.50,000,0002023.04.01.2023.04.05.2026.03.02.',),
+        )
+    candidate = CrawlerSource(db).list_candidates()[0]
+
+    payload = build_analysis_input(candidate)
+
+    assert [o['name_masked'] for o in payload['occupants']] == ['김OO', '박OO']
+    assert payload['occupants'][0]['move_in_date'] == '2021-03-15'
+    assert payload['occupants'][0]['fixed_date'] == '2021-03-20'
+    assert payload['occupants'][0]['deposit'] == 180000000
+    assert payload['occupants'][0]['opposability_possible'] is True
+    assert payload['occupants'][1]['deposit'] == 50000000
+    assert payload['lease_and_distribution']['tenant_move_in_before_standard_right'] is True

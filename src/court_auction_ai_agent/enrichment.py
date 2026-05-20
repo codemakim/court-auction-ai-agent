@@ -21,9 +21,11 @@ PROMPT_SYSTEM = """너는 한국 부동산 경매 물건의 위험도와 투자 
 2. 불확실한 값은 반드시 "확인 필요"로 표시하라.
 3. 임차인 대항력, 배당요구, 보증금 인수 가능성을 최우선으로 분석하라.
 4. 말소기준권리보다 앞서는 권리 또는 점유자가 있는지 확인하라.
-5. 낙찰가 판단 시 최소매각가뿐 아니라 추가 인수 가능 금액, 수리비, 세금, 명도 리스크를 함께 고려하라.
-6. 재개발/모아타운 정보는 메리트이지만, 진행 단계와 분담금이 불확실하면 리스크로도 평가하라.
-7. 법률 자문처럼 단정하지 말고, 실무 체크리스트와 보수적 판단을 제시하라.
+5. `standard_extinguishing_right.type`이 `auction_start_decision_or_unknown`이면 이를 저당권/말소기준권리로 단정하지 말고 확인 필요로 표시하라.
+6. `raw_notes`에 빈 섹션 제목만 있으면 실제 리스크로 단정하지 마라.
+7. 낙찰가 판단 시 최소매각가뿐 아니라 추가 인수 가능 금액, 수리비, 세금, 명도 리스크를 함께 고려하라.
+8. 재개발/모아타운 정보는 메리트이지만, 진행 단계와 분담금이 불확실하면 리스크로도 평가하라.
+9. 법률 자문처럼 단정하지 말고, 실무 체크리스트와 보수적 판단을 제시하라.
 
 출력은 지정된 JSON schema만 사용하라."""
 
@@ -71,64 +73,145 @@ def _compact_sale_spec(markdown: str, limit: int = 5200) -> str:
     return compact if len(compact) <= limit else compact[:limit].rstrip() + "…"
 
 
-def _extract_occupants(sale_spec: str) -> list[dict[str, Any]]:
-    text = _compact_sale_spec(sale_spec, limit=4000)
-    if "조사된 임차내역없음" in text:
-        return []
-    occupants: list[dict[str, Any]] = []
-    # Text extraction often collapses table cells. Keep this deliberately conservative.
-    section = text.split("[점유/임차 관계]", 1)[1] if "[점유/임차 관계]" in text else text
-    money_values = re.findall(r"(\d{1,3}(?:,\d{3})+|\d{7,})", section)
-    dates = [_parse_date(match.group(0)) for match in re.finditer(r"\d{4}[.\-/]\s*\d{1,2}[.\-/]\s*\d{1,2}", section)]
-    label_stopwords = {
+def _mask_name(name: str) -> str:
+    if name in {"주택도시보증공사", "한국토지주택공사", "서울보증보험"}:
+        return name
+    return name[0] + "OO" if len(name) >= 2 else "확인 필요"
+
+
+INSTITUTION_ROW_NAMES = {"주택도시보증공사", "서울보증보험", "한국토지주택공사"}
+
+
+def _is_probable_person_or_org_name(name: str) -> bool:
+    stopwords = {
         "점유자", "점유부분", "정보출처", "보증금", "전유부분", "전부", "등기사항", "전부증명서",
         "주거", "임차권자", "임차인", "권리신고", "현황조사", "전입", "확정일자", "배당요구",
-        "주택도시", "보증공사", "주택도시보증공사",
+        "보증공사", "점유부분정보", "임대차기간", "사업자등록", "외국인등록",
     }
-    names = []
-    for raw_name in re.findall(r"([가-힣]{2,4})(?=(?:전유부분|[0-9]+호|미상|현황조사|권리신고|등기사항))", section):
-        if raw_name in label_stopwords:
+    if name in stopwords:
+        return False
+    if name.endswith(("부분", "사항", "증서", "신고", "일자", "기간", "차임", "출처")):
+        return False
+    return 2 <= len(name) <= 10
+
+
+def _split_occupant_rows(section: str) -> list[tuple[str, str]]:
+    row_start_re = re.compile(r"([가-힣]{2,10})(?=(?:전유부분|[0-9]{1,4}호|미상|전부|[가-힣0-9()]+층))")
+    starts = []
+    for match in row_start_re.finditer(section):
+        name = match.group(1)
+        if _is_probable_person_or_org_name(name) or name in INSTITUTION_ROW_NAMES:
+            starts.append((match.start(), name))
+    rows = []
+    for idx, (start, name) in enumerate(starts):
+        end = starts[idx + 1][0] if idx + 1 < len(starts) else len(section)
+        if name in INSTITUTION_ROW_NAMES:
             continue
-        if raw_name.endswith(("부분", "전부", "사항", "증서", "보증", "공사")):
-            continue
-        names.append(raw_name)
-    for idx, name in enumerate(dict.fromkeys(names)):
+        rows.append((name, section[start:end]))
+    return rows
+
+
+def _extract_occupants(sale_spec: str) -> list[dict[str, Any]]:
+    text = _compact_sale_spec(sale_spec, limit=5000)
+    if "조사된 임차내역없음" in text:
+        return []
+    section = text.split("[점유/임차 관계]", 1)[1] if "[점유/임차 관계]" in text else text
+    rows = _split_occupant_rows(section)
+    occupants: list[dict[str, Any]] = []
+    for name, row_text in rows:
+        dates = [_parse_date(match.group(0)) for match in re.finditer(r"\d{4}[.\-/]\s*\d{1,2}[.\-/]\s*\d{1,2}", row_text)]
+        money_values = [_to_int(match.group(0)) for match in re.finditer(r"\d{1,3}(?:,\d{3})+|\d{7,}", row_text)]
+        money_values = [value for value in money_values if value and value >= 1_000_000]
+        source = "rights_report" if "권리신고" in row_text else "status_report" if "현황조사" in row_text else "registry" if "등기사항" in row_text else "unknown"
+        occupant_type = "tenant" if "임차" in row_text else "owner_or_related_person" if "소유" in row_text else "unknown"
+        distribution_request = "confirmed" if "권리신고" in row_text or "배당요구" in row_text else "unknown"
+        # Typical collapsed order: lease start, deposit, move-in, fixed date, distribution request date.
+        move_in_date = dates[1] if len(dates) >= 2 else dates[0] if dates else None
+        fixed_date = dates[2] if len(dates) >= 3 else None
+        distribution_request_date = dates[-1] if distribution_request == "confirmed" and len(dates) >= 4 else None
         occupants.append(
             {
-                "name_masked": name[0] + "OO" if len(name) >= 2 else "확인 필요",
-                "type": "tenant" if "임차" in section else "unknown",
-                "occupies_property": True if "점유" in section or "전유부분" in section else None,
-                "move_in_date": dates[0] if dates else None,
-                "fixed_date": dates[1] if len(dates) > 1 else None,
-                "distribution_request": "confirmed" if "배당요구" in section and any(dates) else "unknown",
-                "deposit": _to_int(money_values[0]) if money_values else None,
-                "monthly_rent": 0 if "차임" in section else None,
+                "name_masked": _mask_name(name),
+                "source": source,
+                "type": occupant_type,
+                "occupies_property": True if any(token in row_text for token in ("전유부분", "전부", "점유", "호")) else None,
+                "move_in_date": move_in_date,
+                "fixed_date": fixed_date,
+                "distribution_request": distribution_request,
+                "distribution_request_date": distribution_request_date,
+                "deposit": money_values[0] if money_values else None,
+                "monthly_rent": 0 if "차임" in row_text and not re.search(r"차임\s*미상", row_text) else None,
                 "opposability_possible": None,
                 "priority_status": "확인 필요",
+                "raw_text": _trim(row_text, 700),
             }
         )
     if not occupants and any(keyword in section for keyword in ("임차", "점유", "전입", "보증금")):
+        dates = [_parse_date(match.group(0)) for match in re.finditer(r"\d{4}[.\-/]\s*\d{1,2}[.\-/]\s*\d{1,2}", section)]
+        money_values = [_to_int(match.group(0)) for match in re.finditer(r"\d{1,3}(?:,\d{3})+|\d{7,}", section)]
+        money_values = [value for value in money_values if value and value >= 1_000_000]
         occupants.append(
             {
                 "name_masked": "확인 필요",
+                "source": "unparsed_text",
                 "type": "tenant_or_occupant",
                 "occupies_property": True,
                 "move_in_date": dates[0] if dates else None,
                 "fixed_date": dates[1] if len(dates) > 1 else None,
                 "distribution_request": "unknown",
-                "deposit": _to_int(money_values[0]) if money_values else None,
+                "distribution_request_date": None,
+                "deposit": money_values[0] if money_values else None,
                 "monthly_rent": None,
                 "opposability_possible": None,
                 "priority_status": "확인 필요",
+                "raw_text": _trim(section, 700),
             }
         )
-    return occupants[:5]
+    return occupants[:8]
+
+
+def _compare_dates(left: str | None, right: str | None) -> bool | None:
+    if not left or not right:
+        return None
+    return left < right
+
+
+def _extract_standard_right(sale_spec: str) -> dict[str, Any]:
+    match = re.search(r"최선순위설정\s*([0-9.\-/\s]+)\s*([^\n배당]+)?", sale_spec)
+    if not match:
+        return {"type": "확인 필요", "registered_at": None, "holder": None, "claim_max_amount": None, "raw_text": None}
+    registered_at = _parse_date(match.group(1))
+    raw_type = _collapse(match.group(2) or "확인 필요")
+    normalized_type = raw_type
+    if "근저당" in raw_type:
+        normalized_type = "mortgage"
+    elif "가압류" in raw_type:
+        normalized_type = "provisional_seizure"
+    elif "압류" in raw_type:
+        normalized_type = "seizure"
+    elif "담보" in raw_type:
+        normalized_type = "security_right"
+    elif "개시결정" in raw_type:
+        normalized_type = "auction_start_decision_or_unknown"
+    return {"type": normalized_type, "registered_at": registered_at, "holder": None, "claim_max_amount": None, "raw_text": raw_type}
+
+
+def _meaningful_raw_notes(sale_spec: str) -> list[str]:
+    empty_labels = {"[법정지상권]", "[비고]", "[소멸되지 않는 권리/가처분]"}
+    notes = []
+    for line in sale_spec.splitlines():
+        line = _collapse(line)
+        if not line or line in empty_labels:
+            continue
+        notes.append(line)
+    return notes[:24]
 
 
 def build_analysis_input(candidate: AuctionCandidate) -> dict[str, Any]:
     sale_spec = _compact_sale_spec(candidate.sale_spec_markdown)
-    standard_match = re.search(r"최선순위설정\s*([0-9.\-/\s]+)\s*([^\n배당]+)?", sale_spec)
+    standard_right = _extract_standard_right(sale_spec)
     deadline_match = re.search(r"배당요구종기\s*([0-9.\-/\s]+)", sale_spec)
+    occupants = _extract_occupants(candidate.sale_spec_markdown)
     exclusive_area = None
     area_match = re.search(r"전유(?:부분|면적)?[^0-9]{0,20}(\d+(?:\.\d+)?)\s*㎡", candidate.appraisal_summary or "")
     if area_match:
@@ -137,7 +220,7 @@ def build_analysis_input(candidate: AuctionCandidate) -> dict[str, Any]:
     total_floors_match = re.search(r"(\d+)층\s*건물", candidate.appraisal_summary or "")
     approval_match = re.search(r"사용승인일\s*[:：]?\s*(\d{4}[.\-/]\d{1,2}[.\-/]\d{1,2})", candidate.appraisal_summary or "")
     known_red_flags = []
-    if "임차" in sale_spec or "점유" in sale_spec:
+    if occupants or "임차" in sale_spec or "점유" in sale_spec:
         known_red_flags.append("occupant or tenant text exists")
     if "배당" in sale_spec and "배당요구" in sale_spec:
         known_red_flags.append("distribution request needs confirmation")
@@ -169,21 +252,23 @@ def build_analysis_input(candidate: AuctionCandidate) -> dict[str, Any]:
             "minimum_sale_price": candidate.minimum_sale_price,
             "previous_failed_count": candidate.failed_auction_count,
         },
-        "occupants": _extract_occupants(candidate.sale_spec_markdown),
+        "occupants": [
+            {
+                **occupant,
+                "opposability_possible": _compare_dates(occupant.get("move_in_date"), standard_right.get("registered_at")),
+                "priority_status": "potential_senior_tenant" if _compare_dates(occupant.get("move_in_date"), standard_right.get("registered_at")) else "확인 필요",
+            }
+            for occupant in occupants
+        ],
         "rights": {
-            "standard_extinguishing_right": {
-                "type": _collapse(standard_match.group(2) or "확인 필요") if standard_match else "확인 필요",
-                "registered_at": _parse_date(standard_match.group(1)) if standard_match else None,
-                "holder": None,
-                "claim_max_amount": None,
-            },
+            "standard_extinguishing_right": standard_right,
             "registered_rights": [],
         },
         "lease_and_distribution": {
-            "tenant_move_in_before_standard_right": None,
-            "tenant_fixed_date_before_standard_right": None,
+            "tenant_move_in_before_standard_right": any(_compare_dates(occupant.get("move_in_date"), standard_right.get("registered_at")) is True for occupant in occupants),
+            "tenant_fixed_date_before_standard_right": any(_compare_dates(occupant.get("fixed_date"), standard_right.get("registered_at")) is True for occupant in occupants),
             "distribution_demand_deadline": _parse_date(deadline_match.group(1)) if deadline_match else None,
-            "distribution_request_confirmed": None,
+            "distribution_request_confirmed": True if "권리신고" in sale_spec else any(occupant.get("distribution_request") == "confirmed" for occupant in occupants) if occupants else None,
             "possible_deposit_inheritance": "possible" if "인수" in sale_spec else "unknown",
             "known_red_flags": known_red_flags,
         },
@@ -195,7 +280,7 @@ def build_analysis_input(candidate: AuctionCandidate) -> dict[str, Any]:
             "status": "unverified",
             "expected_additional_charge_risk": "unknown",
         },
-        "raw_notes": [line for line in sale_spec.splitlines() if line][:20],
+        "raw_notes": _meaningful_raw_notes(sale_spec),
     }
 
 

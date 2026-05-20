@@ -13,5 +13,5 @@ class Settings(BaseSettings):
     ollama_timeout_seconds: int = 900
     worker_interval_seconds: int = 5
     max_attempts: int = 3
-    prompt_version: str = "investment-risk-v1"
-    schema_version: str = "investment-risk-v1"
+    prompt_version: str = "investment-risk-v2"
+    schema_version: str = "investment-risk-v2"
